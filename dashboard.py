@@ -1,79 +1,101 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
-import scispacy
-import spacy
-from scispacy.linking import EntityLinker
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import StratifiedKFold
+from imblearn.over_sampling import SMOTE
 
-# Load ScispaCy model and UMLS linker
-@st.cache_resource
-def load_model():
-    nlp = spacy.load("en_core_sci_md")
-    linker = EntityLinker(resolve_abbreviations=True, name="umls")
-    nlp.add_pipe(linker)
-    return nlp, linker
+# Load dataset
+@st.cache_data
+def load_data():
+    return pd.read_csv(r'C:\Users\PAVANI\OneDrive\Desktop\IBM Project\dataset\health prescription data.csv')
 
-nlp, linker = load_model()
+df = load_data()
 
-# Medical term extractor using ScispaCy
-def extract_medical_terms(text):
-    doc = nlp(text)
-    medical_terms = []
-    for entity in doc.ents:
-        for umls_ent in entity._.umls_ents:
-            concept_id, _ = umls_ent
-            preferred_name = linker.kb.cui_to_entity[concept_id].canonical_name
-            medical_terms.append(preferred_name)
-    return ", ".join(set(medical_terms)) if medical_terms else "No medical terms found"
+# Title
+st.title("Health Prescription Classifier Dashboard")
 
-# Data cleaning function
-def clean_data(df):
-    df["SUGGESTED_DIAGNOSIS"] = df["TEXT"].apply(extract_medical_terms)
-    return df
+# Display dataset info
+st.subheader("Dataset Overview")
+st.write(df.head())
 
-# Streamlit app layout
-st.title("🩺 Automated Healthcare Data Cleaning Dashboard")
+# Preprocess Data
+X = df['TEXT']
+y = df['DIAGNOSIS']
 
-# Upload dataset
-uploaded_file = st.file_uploader(r"C:\Users\PAVANI\OneDrive\Desktop\IBM Project\dataset\health prescription data.csv", type=["csv"])
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
+vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
+X_tfidf = vectorizer.fit_transform(X)
 
-    # Show raw data
-    st.subheader("📊 Raw Data Preview")
-    st.write(df.head())
+# Handle class imbalance
+smote = SMOTE(sampling_strategy='auto', k_neighbors=1, random_state=42)
 
-    # Clean the data
-    if st.button("🧹 Clean Data with ScispaCy"):
-        df_cleaned = clean_data(df)
+# Filter small classes
+class_counts = y.value_counts()
+small_classes = class_counts[class_counts < 2].index
+y_filtered = y[~y.isin(small_classes)]
+X_filtered = X_tfidf[~y.isin(small_classes)]
 
-        # Display cleaned data
-        st.subheader("✅ Cleaned Data Preview")
-        st.write(df_cleaned.head())
+X_resampled, y_resampled = smote.fit_resample(X_filtered, y_filtered)
 
-        # Download cleaned data
-        csv = df_cleaned.to_csv(index=False).encode('utf-8')
-        st.download_button("⬇️ Download Cleaned Data", csv, "cleaned_healthcare_data.csv", "text/csv")
+# Cross Validation Setup
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-        # Diagnosis distribution
-        st.subheader("📈 Diagnosis Distribution")
-        if "DIAGNOSIS" in df.columns:
-            plt.figure(figsize=(10, 5))
-            sns.countplot(y=df["DIAGNOSIS"], order=df["DIAGNOSIS"].value_counts().index, palette="viridis")
-            st.pyplot(plt)
+# Store model performance
+all_reports = []
+all_confusion_matrices = []
 
-        # Anomaly detection insight
-        st.subheader("📌 Suggested Diagnoses")
-        st.write(df_cleaned[["TEXT", "SUGGESTED_DIAGNOSIS"]].head(10))
+# Train and Evaluate Model
+st.subheader("Model Training and Evaluation")
 
-# Instructions
-st.sidebar.header("🛠️ Instructions")
-st.sidebar.info(
-    """
-1. Upload your healthcare dataset (CSV).  
-2. Click 'Clean Data' to process using **ScispaCy**.  
-3. Download the cleaned dataset.  
-4. View diagnosis insights & anomalies.  
-"""
-)
+for train_idx, val_idx in cv.split(X_resampled, y_resampled):
+    X_train, X_val = X_resampled[train_idx], X_resampled[val_idx]
+    y_train, y_val = y_resampled[train_idx], y_resampled[val_idx]
+
+    model = RandomForestClassifier(class_weight='balanced', n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_val)
+
+    report = classification_report(y_val, y_pred, output_dict=True)
+    all_reports.append(report)
+
+    cm = confusion_matrix(y_val, y_pred)
+    all_confusion_matrices.append(cm)
+
+# Average Metrics
+average_report = {
+    'precision_macro_avg': np.mean([report['macro avg']['precision'] for report in all_reports]),
+    'recall_macro_avg': np.mean([report['macro avg']['recall'] for report in all_reports]),
+    'f1-score_macro_avg': np.mean([report['macro avg']['f1-score'] for report in all_reports]),
+    'precision_weighted_avg': np.mean([report['weighted avg']['precision'] for report in all_reports]),
+    'recall_weighted_avg': np.mean([report['weighted avg']['recall'] for report in all_reports]),
+    'f1-score_weighted_avg': np.mean([report['weighted avg']['f1-score'] for report in all_reports]),
+}
+
+st.write("### Average Classification Report")
+st.dataframe(pd.DataFrame(average_report, index=[0]))
+
+# Average Confusion Matrix
+average_cm = np.mean(all_confusion_matrices, axis=0)
+
+st.write("### Average Confusion Matrix")
+plt.figure(figsize=(12, 8))
+sns.heatmap(average_cm, annot=True, fmt='.0f', cmap='Blues', xticklabels=model.classes_, yticklabels=model.classes_)
+plt.xlabel('Predicted')
+plt.ylabel('True')
+st.pyplot(plt)
+
+# Prediction on New Data
+st.subheader("Make Predictions")
+input_text = st.text_area("Enter Medical Text for Diagnosis Prediction:")
+if st.button("Predict"):
+    if input_text:
+        input_tfidf = vectorizer.transform([input_text])
+        prediction = model.predict(input_tfidf)
+        st.success(f"Predicted Diagnosis: {prediction[0]}")
+    else:
+        st.error("Please enter valid medical text.")
