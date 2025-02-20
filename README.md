@@ -13,12 +13,8 @@ Problem definition:
 Healthcare data, particularly prescriptions, are prone to inconsistencies, errors, and variability in format. Manual cleaning is time-intensive and error-prone, and traditional systems struggle with complex medical terminologies.
 
 
-Requirements:
-
-
- Functional Requirements:
-
-
+Requirements:  
+ Functional Requirements:  
 •	Load and process prescription data.
 
 
